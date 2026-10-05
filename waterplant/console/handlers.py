@@ -385,3 +385,159 @@ def export_audit(server: "Server", request: Request) -> Response:
 def export_telemetry(server: "Server", request: Request) -> Response:
     columns, rows = telemetry_export(telemetry_module.collect(server.runtime))
     return csv_response(to_csv(columns, rows))
+
+
+def _query_param(request: Request, name: str) -> str:
+    """Read a parameter from the JSON payload, falling back to the query string."""
+
+    if name in request.payload:
+        return request.str_field(name)
+    values = request.query.get(name)
+    return values[0] if values else ""
+
+
+def metering_state(server: "Server", request: Request) -> Response:
+    metering = server.runtime.metering
+    return json_response(
+        {
+            "state": metering.state().as_dict(),
+            "describe": metering.describe(),
+            "calibrations": metering.calibrations.all(),
+            "replacements": metering.replacements.all(),
+            "settlements": metering.settlements.all(),
+        }
+    )
+
+
+def metering_meters(server: "Server", request: Request) -> Response:
+    return json_response({"meters": server.runtime.metering.meters.all()})
+
+
+def metering_meter_register(server: "Server", request: Request) -> Response:
+    factor = request.float_field("factor", 0.0)
+    meter = server.runtime.metering.meters.register(
+        request.str_field("serial"),
+        location=request.str_field("location"),
+        medium=request.str_field("medium"),
+        initial_factor=factor if factor > 0 else None,
+        effective_from=request.str_field("effective_from"),
+    )
+    return json_response({"meter": meter})
+
+
+def metering_timeline(server: "Server", request: Request) -> Response:
+    metering = server.runtime.metering
+    meter_id = _query_param(request, "meter_id")
+    return json_response(
+        {
+            "meter": metering.meters.get(meter_id),
+            "versions": metering.versions.timeline(meter_id),
+        }
+    )
+
+
+def metering_version_at(server: "Server", request: Request) -> Response:
+    metering = server.runtime.metering
+    meter_id = _query_param(request, "meter_id")
+    ts = _query_param(request, "ts")
+    return json_response({"version": metering.versions.version_at(meter_id, ts)})
+
+
+def metering_readings(server: "Server", request: Request) -> Response:
+    metering = server.runtime.metering
+    meter_id = _query_param(request, "meter_id")
+    return json_response({"readings": metering.readings.all(meter_id)})
+
+
+def metering_calibrations(server: "Server", request: Request) -> Response:
+    return json_response({"calibrations": server.runtime.metering.calibrations.all()})
+
+
+def metering_replacements(server: "Server", request: Request) -> Response:
+    return json_response({"replacements": server.runtime.metering.replacements.all()})
+
+
+def metering_settlements(server: "Server", request: Request) -> Response:
+    return json_response({"settlements": server.runtime.metering.settlements.all()})
+
+
+def metering_calibration_start(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.calibrations.start(
+        request.str_field("meter_id"),
+        request.float_field("factor"),
+        policy=request.str_field("policy", "IMMEDIATE"),
+        request_id=request.str_field("request_id"),
+        reference=request.str_field("reference"),
+        operator=request.str_field("operator"),
+    )
+    return json_response({"calibration": record})
+
+
+def metering_calibration_apply(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.calibrations.apply(request.str_field("calibration_id"))
+    return json_response({"calibration": record})
+
+
+def metering_calibration_recover(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.calibrations.recover(request.str_field("calibration_id"))
+    return json_response({"calibration": record})
+
+
+def metering_replacement_start(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.replacements.start(
+        request.str_field("old_meter_id"),
+        request.str_field("new_serial"),
+        request.float_field("factor"),
+        policy=request.str_field("policy", "IMMEDIATE"),
+        request_id=request.str_field("request_id"),
+        operator=request.str_field("operator"),
+    )
+    return json_response({"replacement": record})
+
+
+def metering_replacement_apply(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.replacements.apply(request.str_field("replacement_id"))
+    return json_response({"replacement": record})
+
+
+def metering_replacement_recover(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.replacements.recover(request.str_field("replacement_id"))
+    return json_response({"replacement": record})
+
+
+def metering_reading(server: "Server", request: Request) -> Response:
+    reading = server.runtime.metering.readings.ingest(
+        request.str_field("meter_id"),
+        request.str_field("ts"),
+        request.float_field("raw"),
+        idempotency_key=request.str_field("idempotency_key"),
+        client_version_id=request.str_field("client_version_id"),
+    )
+    return json_response({"reading": reading})
+
+
+def metering_settle(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.settlements.settle(
+        request.str_field("meter_id"),
+        request.str_field("period_start"),
+        request.str_field("period_end"),
+    )
+    return json_response({"settlement": record})
+
+
+def metering_finalize(server: "Server", request: Request) -> Response:
+    record = server.runtime.metering.settlements.finalize(
+        request.str_field("meter_id"),
+        request.str_field("period_start"),
+        request.str_field("period_end"),
+    )
+    return json_response({"settlement": record})
+
+
+def metering_verify(server: "Server", request: Request) -> Response:
+    report = server.runtime.metering.settlements.verify(
+        request.str_field("meter_id"),
+        request.str_field("period_start"),
+        request.str_field("period_end"),
+    )
+    return json_response({"report": report})

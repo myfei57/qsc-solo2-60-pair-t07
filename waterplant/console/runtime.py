@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from waterplant.audit import Auditor
 from waterplant.backwash import Controller
+from waterplant.calibration import Metering
 from waterplant.chlor import Doser as ChlorDoser
 from waterplant.clearwell import Well
 from waterplant.coag import Doser as CoagDoser
@@ -41,3 +42,4 @@ class Runtime:
         self.scheduler = Scheduler(store)
         self.trend = Trend(store)
         self.inventory = Inventory(store)
+        self.metering = Metering(store)
