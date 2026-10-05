@@ -11,6 +11,10 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
     checks = [{"name": "store", "status": "ok", "detail": f"keys={rt.store.count()}"}]
     if rt.calibration.current() <= 0:
         checks.append({"name": "calibration", "status": "fail", "detail": "factor must be positive"})
+    elif any(job.status == "failed" for job in rt.calibration.jobs()):
+        checks.append({"name": "calibration", "status": "warn", "detail": "calibration job requires recovery"})
+    elif rt.calibration.pending_changes():
+        checks.append({"name": "calibration", "status": "ok", "detail": "factor set; replacement scheduled"})
     else:
         checks.append({"name": "calibration", "status": "ok", "detail": "factor set"})
     if rt.well.residual_target() <= 0:

@@ -19,6 +19,8 @@ def seed_defaults(store: Store) -> None:
     calibration = Calibration(store)
     if calibration.current() <= 0:
         calibration.replace(1.0)
+    else:
+        calibration.ensure_baseline()
 
     well = Well(store)
     if well.residual_target() <= 0:

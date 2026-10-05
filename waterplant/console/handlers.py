@@ -7,13 +7,21 @@ from typing import TYPE_CHECKING
 from waterplant.chlor import validate_demand
 from waterplant.clearwell import validate_level
 from waterplant.filter import validate_zone
-from waterplant.flow import calibrate_meter, validate_factor
+from waterplant.flow import (
+    DEFAULT_BOUNDARY,
+    CalibrationError,
+    calibrate_meter,
+    factor_from_samples,
+    validate_factor,
+    validate_samples,
+    validate_serial,
+)
 from waterplant.intake import DEFAULT_WINDOW, Sensor, validate_flow
 from waterplant.inventory import validate_quantity
 from waterplant.ns import Stage, treatment_line
 from waterplant.ph import validate_ph
 from waterplant.quota import Quota, check_quota, validate_amount
-from waterplant.reporting import audit_export, telemetry_export, to_csv
+from waterplant.reporting import audit_export, calibration_audit_export, telemetry_export, to_csv
 from waterplant.scheduler import validate_threshold
 from waterplant.store import export_state
 
@@ -137,9 +145,193 @@ def coag_ratio(server: "Server", request: Request) -> Response:
 def flow_replace(server: "Server", request: Request) -> Response:
     factor = request.float_field("factor")
     validate_factor(factor)
-    meter = calibrate_meter(request.str_field("serial"), factor)
-    server.runtime.calibration.replace(meter.factor)
+    serial = request.str_field("serial", "legacy-meter")
+    mode = request.str_field("mode", "immediate")
+    shift_boundary = request.str_field("shift_boundary", DEFAULT_BOUNDARY)
+    effective_at = _optional_float(request, "effective_at")
+    compatibility_until = _optional_float(request, "compatibility_until")
+    request_id = request.str_field("request_id")
+    meter = calibrate_meter(serial, factor)
+    change = server.runtime.calibration.replace_meter(
+        serial,
+        factor,
+        mode=mode,
+        effective_at=None if effective_at is None else int(effective_at),
+        shift_boundary=shift_boundary,
+        compatibility_until=None if compatibility_until is None else int(compatibility_until),
+        request_id=request_id,
+    )
+    version = server.runtime.calibration.version(change.version_id)
+    return json_response({
+        "meter": meter.as_dict(),
+        "change": change.as_dict(),
+        "version": None if version is None else version.as_dict(),
+    })
+
+
+def flow_archive(server: "Server", request: Request) -> Response:
+    manager = server.runtime.calibration
+    meters = manager.meters()
+    versions = manager.versions()
+    changes = manager.changes()
+    return json_response({
+        "meters": [meter.as_dict() for meter in meters],
+        "versions": [version.as_dict() for version in versions],
+        "changes": [change.as_dict() for change in changes],
+        "current_version": (
+            None
+            if manager.current_version() is None
+            else manager.current_version().as_dict()
+        ),
+        "pending_changes": [change.as_dict() for change in manager.pending_changes()],
+    })
+
+
+def flow_meters_register(server: "Server", request: Request) -> Response:
+    serial = request.str_field("serial")
+    validate_serial(serial)
+    commissioned_at = _optional_float(request, "commissioned_at")
+    attributes = request.payload.get("attributes", {})
+    if attributes is not None and not isinstance(attributes, dict):
+        raise ValueError("attributes must be an object")
+    meter = server.runtime.calibration.register_meter(
+        serial,
+        model=request.str_field("model"),
+        manufacturer=request.str_field("manufacturer"),
+        location=request.str_field("location"),
+        commissioned_at=None if commissioned_at is None else int(commissioned_at),
+        attributes=attributes or {},
+        request_id=request.str_field("request_id"),
+    )
     return json_response({"meter": meter.as_dict()})
+
+
+def flow_versions_create(server: "Server", request: Request) -> Response:
+    samples = _calibration_samples(request)
+    factor_value = _optional_float(request, "factor")
+    factor = factor_from_samples(samples) if factor_value is None else factor_value
+    validate_factor(factor)
+    version = server.runtime.calibration.calibrate(
+        request.str_field("serial"),
+        samples=samples,
+        basis=request.str_field("basis", "samples"),
+        factor=factor,
+        version_id=request.str_field("version_id"),
+        request_id=request.str_field("request_id"),
+    )
+    return json_response({"version": version.as_dict()})
+
+
+def flow_calibrations_start(server: "Server", request: Request) -> Response:
+    samples = _calibration_samples(request)
+    factor_value = _optional_float(request, "factor")
+    effective_at_value = _optional_float(request, "effective_at")
+    try:
+        job = server.runtime.calibration.run_calibration_job(
+            serial=request.str_field("serial"),
+            samples=samples,
+            mode=request.str_field("mode", "immediate"),
+            shift_boundary=request.str_field("shift_boundary", DEFAULT_BOUNDARY),
+            model=request.str_field("model"),
+            manufacturer=request.str_field("manufacturer"),
+            location=request.str_field("location"),
+            factor=factor_value,
+            fail_before=request.str_field("fail_before"),
+            job_id=request.str_field("job_id"),
+            request_id=request.str_field("request_id"),
+            effective_at=None if effective_at_value is None else int(effective_at_value),
+        )
+    except CalibrationError as exc:
+        job = server.runtime.calibration.job(exc.job_id)
+        if job is None:
+            raise
+        raise RequestError(409, f"calibration failed before {exc.stage}; job_id={exc.job_id}") from exc
+    return json_response({"job": job.as_dict()})
+
+
+def flow_calibrations_recover(server: "Server", request: Request) -> Response:
+    job = server.runtime.calibration.recover_job(
+        request.str_field("job_id"),
+        None if _optional_float(request, "at") is None else int(_optional_float(request, "at")),
+    )
+    return json_response({"job": job.as_dict()})
+
+
+def flow_activate_due(server: "Server", request: Request) -> Response:
+    at = _optional_float(request, "at")
+    changes = server.runtime.calibration.activate_due(None if at is None else int(at))
+    result = server.runtime.calibration.recompute_pending(
+        None if at is None else int(at)
+    )
+    return json_response({
+        "activated": [change.as_dict() for change in changes],
+        "recompute": result,
+    })
+
+
+def flow_readings(server: "Server", request: Request) -> Response:
+    manager = server.runtime.calibration
+    return json_response({
+        "readings": [reading.as_dict() for reading in manager.readings()],
+        "pending": [reading.raw.reading_id for reading in manager.pending_readings()],
+        "consistency": manager.consistency_check(),
+    })
+
+
+def flow_readings_record(server: "Server", request: Request) -> Response:
+    observed_at = _optional_float(request, "observed_at")
+    at = _optional_float(request, "at")
+    reading = server.runtime.calibration.record_reading(
+        raw_value=request.float_field("raw_value"),
+        observed_at=None if observed_at is None else int(observed_at),
+        meter_serial=request.str_field("meter_serial"),
+        source_version_id=request.str_field("source_version_id"),
+        settlement_version_id=request.str_field("settlement_version_id"),
+        reading_id=request.str_field("reading_id"),
+        quality=request.str_field("quality", "good"),
+        request_id=request.str_field("request_id"),
+        at=None if at is None else int(at),
+    )
+    return json_response({"reading": reading.as_dict()})
+
+
+def flow_readings_recompute(server: "Server", request: Request) -> Response:
+    at = _optional_float(request, "at")
+    reading_id = request.str_field("reading_id")
+    if reading_id:
+        reading = server.runtime.calibration.recompute_reading(
+            reading_id, None if at is None else int(at)
+        )
+        return json_response({"reading": reading.as_dict()})
+    return json_response(server.runtime.calibration.recompute_pending(None if at is None else int(at)))
+
+
+def flow_consistency(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.calibration.consistency_check())
+
+
+def _calibration_samples(request: Request) -> list[dict[str, float]]:
+    raw_samples = request.payload.get("samples", [])
+    if not isinstance(raw_samples, list):
+        raise ValueError("samples must be a list of {raw, reference} objects")
+    samples: list[dict[str, float]] = []
+    for sample in raw_samples:
+        if not isinstance(sample, dict):
+            raise ValueError("each sample must be an object")
+        try:
+            samples.append({"raw": float(sample["raw"]), "reference": float(sample["reference"])})
+        except KeyError as exc:
+            raise ValueError("each sample requires raw and reference") from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError("raw and reference sample values must be numbers") from exc
+    validate_samples(samples)
+    return samples
+
+
+def _optional_float(request: Request, name: str) -> float | None:
+    if name not in request.payload or request.payload[name] is None:
+        return None
+    return request.float_field(name)
 
 
 def chlor_target(server: "Server", request: Request) -> Response:
@@ -379,6 +571,11 @@ def metrics_reset(server: "Server", request: Request) -> Response:
 
 def export_audit(server: "Server", request: Request) -> Response:
     columns, rows = audit_export(server.runtime.auditor)
+    return csv_response(to_csv(columns, rows))
+
+
+def export_calibration_audit(server: "Server", request: Request) -> Response:
+    columns, rows = calibration_audit_export(server.runtime.auditor)
     return csv_response(to_csv(columns, rows))
 
 

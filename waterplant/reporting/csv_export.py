@@ -40,3 +40,15 @@ def telemetry_export(telemetry: Telemetry) -> tuple[list[str], list[list[object]
     """Columns and rows for the telemetry counters."""
 
     return ["metric", "value"], [[key, value] for key, value in telemetry.as_dict().items()]
+
+
+def calibration_audit_export(auditor: Auditor) -> tuple[list[str], list[list[str]]]:
+    """Columns and rows for meter and calibration audit entries."""
+
+    columns = ["time", "kind", "detail", "id"]
+    rows = [
+        [entry.time, entry.kind, entry.detail, entry.id]
+        for entry in auditor.entries()
+        if entry.kind in ("meter_replace", "meter_archive", "calibration")
+    ]
+    return columns, rows
